@@ -10,17 +10,13 @@ summary: >
 """
 
 from typing import Tuple, Optional
-import numpy as np
 import math
 
 import torch
 import torch.nn.functional as F
 import torch.utils.data
 from torch import nn
-
 from utils import gather
-
-import matplotlib.pyplot as plt
 
 
 class DenoiseDiffusion:
@@ -28,7 +24,7 @@ class DenoiseDiffusion:
     ## Denoise Diffusion
     """
 
-    def __init__(self, eps_model: nn.Module, n_steps: int, schedule_name: str, noise_type: str, device: torch.device):
+    def __init__(self, eps_model: nn.Module, n_steps: int, schedule_name: str, device: torch.device):
         """
         Initialize a DenoiseDiffusion object.
 
@@ -42,12 +38,10 @@ class DenoiseDiffusion:
         self.eps_model = eps_model
         self.n_steps = n_steps
         self.schedule_name = schedule_name
-        self.noise_type = noise_type
         self.device = device
 
         # Create an increasing variance schedule for the diffusion process.
         self.beta = self.get_named_beta_schedule().to(self.device)
-
         # Compute the complementary values of beta.
         self.alpha = 1. - self.beta
         # Compute the cumulative product of alpha.
@@ -72,17 +66,18 @@ class DenoiseDiffusion:
         they are committed to maintain backwards compatibility.
         """
 
-        if self.schedule_name == "linear":
+        if self.schedule_name == 'linear':
             # Linear schedule from Ho et al, extended to work for any number of diffusion steps.
             scale = 1000 / self.n_steps
             beta_start = scale * 0.0001
             beta_end = scale * 0.02
             return torch.linspace(beta_start, beta_end, self.n_steps, dtype=torch.float32)
-        elif self.schedule_name == "cosine":
+        elif self.schedule_name == 'cosine':
             # Cosine schedule from Nichol et al
             return self.betas_for_alpha_bar(lambda t: math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2, )
         else:
-            raise NotImplementedError(f"unknown beta schedule: {self.schedule_name}")
+            raise NotImplementedError(f'Unknown beta schedule: {self.schedule_name}.'
+                                      f' Possible options are: "linear" and "cosine".')
 
     def betas_for_alpha_bar(self, alpha_bar: get_named_beta_schedule, max_beta: int = 0.999) -> torch.Tensor:
         """
@@ -125,21 +120,11 @@ class DenoiseDiffusion:
         A tuple containing the mean and variance of the distribution.
 
         """
-
         # Gather the value of alpha_bar for the current step, and then compute sqrt(α̅ₜ ) * x_0
         mean = gather(self.alpha_bar, t) ** 0.5 * x0
-        if self.noise_type == 'gaussian':
-            # The variance is then: (1 - α̅ₜ ) * I
-            var = 1 - gather(self.alpha_bar, t)
-            return mean, var, None
-        elif self.noise_type == 'gamma':
-            # The shape parameter is then: sqrt(α̅ₜ) * θ
-            scale = gather(self.alpha_bar, t) ** 0.5 * self.theta # TODO: scale and shape are the size of
-            # The shape parameter is then: k̅ₜ
-            shape = gather(self.k_bar, t) # TODO: Does the order have an effect on the values? paper: first gather, then transformations, here vice versa
-            return mean, shape, scale
-        else:
-            raise NotImplementedError(f"unknown beta schedule: {self.noise_type}")
+        # The variance is then: (1 - α̅ₜ ) * I
+        var = 1 - gather(self.alpha_bar, t)
+        return mean, var
 
     def q_sample(self, x0: torch.Tensor, t: torch.Tensor, eps: Optional[torch.Tensor] = None):
         """
@@ -157,22 +142,12 @@ class DenoiseDiffusion:
         """
         # Get the distribution (so, $q(x_t|x_0)$) of the final latent state given the initial latent state and the
         # current step in the diffusion process.
-        if self.noise_type == 'gaussian':
-            mean, var, _ = self.q_xt_x0(x0, t)
-            # If no noise is provided, generate noise by sampling from a standard normal distribution (so from N(I,0)).
-            if eps is None:
-                eps = torch.randn_like(x0)
-            # Sample from that distribution $q(x_t|x_0)$ with Gaussian noise.
-            return mean + (var ** 0.5) * eps
-        elif self.noise_type == 'gamma':
-            mean, shape, scale = self.q_xt_x0(x0, t)
-            # If no noise is provided, generate noise by sampling from a gamma distribution (so from G(k,θ)).
-            if eps is None:
-                eps = torch.distributions.gamma.Gamma(shape, 1 / scale).sample()
-            # Sample from that distribution $q(x_t|x_0)$ with Gamma noise. Nahkmani et al. eq 21
-            return mean + (eps - shape * scale)
-        else:
-            raise NotImplementedError(f"unknown beta schedule: {self.noise_type}")
+        mean, var = self.q_xt_x0(x0, t)
+        # If no noise is provided, generate noise by sampling from a standard normal distribution (so from N(I,0)).
+        if eps is None:
+            eps = torch.randn_like(x0)
+        # Sample from that distribution $q(x_t|x_0)$ with Gaussian noise.
+        return mean + (var ** 0.5) * eps
 
     def p_sample(self, xt: torch.Tensor, t: torch.Tensor):
         """
@@ -224,18 +199,10 @@ class DenoiseDiffusion:
         t = torch.randint(0, self.n_steps, (batch_size,), device=x0.device,
                           dtype=torch.long)  # Randint gives  unfiormly distributed ints
 
-        if self.noise_type == 'gaussian':
-            # Generate noise if it was not provided
-            if noise is None:
-                # Generate noise from a normal distribution with mean 0 and variance 1
-                noise = torch.randn_like(x0)
-        elif self.noise_type == 'gamma':
-            mean, shape, scale = self.q_xt_x0(x0, t) # TODO: What parameters to gather here?
-            # If no noise is provided, generate noise by sampling from a gamma distribution (so from G(k,θ)).
-            if noise is None:
-                noise = torch.distributions.gamma.Gamma(shape, 1/scale).sample() # TODO: what is the correct input here?
-        else:
-            raise NotImplementedError(f"unknown beta schedule: {self.noise_type}")
+        # Generate noise if it was not provided
+        if noise is None:
+            # Generate noise from a normal distribution with mean 0 and variance 1
+            noise = torch.randn_like(x0)
 
         # Sample xₜ for q(xₜ | x₀)
         xt = self.q_sample(x0, t, eps=noise)

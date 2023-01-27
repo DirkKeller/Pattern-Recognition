@@ -20,18 +20,20 @@ simplicity.
 (obtained from: From: https://github.com/labmlai/annotated_deep_learning_paper_implementations/blob/master/labml_nn/diffusion/ddpm/experiment.py)
 """
 
-from typing import List, Tuple
+from typing import List
 
 import torch
 import torch.utils.data
 import torchvision
-from PIL import Image
 
 from labml import lab, tracker, experiment, monit
 from labml.configs import BaseConfigs, option
 from labml_helpers.device import DeviceConfigs
 from noise import DenoiseDiffusion
 from unet import UNet
+
+#from torchview import draw_graph
+#from torchsummary import summary
 
 
 def main():
@@ -44,9 +46,9 @@ def main():
 
     # Set configurations. You can override the defaults by passing the values in the dictionary.
     experiment.configs(configs, {
-        'dataset': 'MNIST',  # 'CelebA'
-        'image_channels': 1,  # 3,
-        'epochs': 5,  # 100,
+        'dataset': 'MNIST',  # 'CIFAR10', 'CelebA' 'MNIST'
+        'image_channels': 1,  # 3, 3, 1
+        'epochs': 5,  # 100, 100, 5
     })
 
     # Initialize
@@ -68,13 +70,13 @@ class Configs(BaseConfigs):
         device (torch.device):           Device on which to run the model.
         eps_model (UNet):                U-Net model for the function `epsilon_theta`.
         diffusion (DenoiseDiffusion):    DDPM algorithm.
-        schedule_name (str):             Function of the noise schedule
-        noise_type (str):                Distributional family applied as noise in the diffusion
         image_channels (int):            Number of channels in the image (e.g. 3 for RGB).
         image_size (int):                Size of the image.
         n_channels (int):                Number of channels in the initial feature map.
         channel_multipliers (List[int]): Number of channels at each resolution.
         is_attention (List[bool]):       Indicates whether to use attention at each resolution.
+        convolutional_block (str):       Type of the convolutional block used
+        schedule_name (str):             Function of the noise schedule
         n_steps (int):                   Number of time steps.
         batch_size (int):                Batch size.
         n_samples (int):                 Number of samples to generate.
@@ -95,11 +97,6 @@ class Configs(BaseConfigs):
     # [DDPM algorithm](index.html)
     diffusion: DenoiseDiffusion
 
-    # Defines the noise schedule. Possible options are 'linear' and 'cosine'.
-    schedule_name = 'linear'
-    # Defines the noise type of the diffusion process. Possible options are 'gaussian' and 'gamma'.
-    noise_type = 'gaussian'
-
     # Number of channels in the image. $3$ for RGB.
     image_channels: int = 3
     # Image size
@@ -111,16 +108,20 @@ class Configs(BaseConfigs):
     channel_multipliers: List[int] = [1, 2, 2, 4]
     # The list of booleans that indicate whether to use attention at each resolution
     is_attention: List[int] = [False, False, False, True]
+    # Convolutional block type used in the UNet blocks. Possible options are 'residual' and 'recurrent'.
+    convolutional_block = 'residual'
 
+    # Defines the noise schedule. Possible options are 'linear' and 'cosine'.
+    schedule_name: str = 'cosine'
     # Number of time steps $T$ (with $T$ = 1_000 from Ho et al).
-    n_steps: int = 1_000
+    n_steps: int = 1000
+
     # Batch size
     batch_size: int = 64
     # Number of samples to generate
     n_samples: int = 16
     # Learning rate
     learning_rate: float = 2e-5
-
     # Number of training epochs
     epochs: int = 1_000
 
@@ -143,6 +144,7 @@ class Configs(BaseConfigs):
             n_channels=self.n_channels,
             ch_mults=self.channel_multipliers,
             is_attn=self.is_attention,
+            conv_block=self.convolutional_block
         ).to(self.device)
 
         # Create [DDPM class](index.html)
@@ -150,7 +152,6 @@ class Configs(BaseConfigs):
             eps_model=self.eps_model,
             n_steps=self.n_steps,
             schedule_name=self.schedule_name,
-            noise_type=self.noise_type,
             device=self.device,
         )
 
@@ -161,6 +162,11 @@ class Configs(BaseConfigs):
 
         # Image logging
         tracker.set_image("sample", True)
+
+        # Visualize model architecture via forward pass
+        # summary(self.eps_model, [next(iter(self.data_loader)).shape, (self.batch_size,)])
+        # model_graph = draw_graph(model=UNet(), input_size=[(64,1,28,28), (64,)], expand_nested=True, device='meta')
+        # model_graph.visual_graph
 
     def sample(self) -> None:
         """
@@ -186,6 +192,7 @@ class Configs(BaseConfigs):
         """
         Train a Denoising Diffusion Probabilistic Model (DDPM) with the set dataloader.
         """
+
         # Iterate through the dataset
         for data in monit.iterate('Train', self.data_loader):
             # Increment global step
@@ -219,54 +226,6 @@ class Configs(BaseConfigs):
             experiment.save_checkpoint()
 
 
-class CelebADataset(torch.utils.data.Dataset):
-    """
-    A PyTorch dataset for the CelebA-HQ dataset.
-    """
-
-    def __init__(self, image_size: int):
-        super().__init__()
-
-        # CelebA images folder
-        folder = lab.get_data_path() / 'celebA'
-        # List of files
-        self._files = [p for p in folder.glob(f'**/*.jpg')]
-
-        # Transformations to resize the image and convert to tensor
-        self._transform = torchvision.transforms.Compose([
-            torchvision.transforms.Resize(image_size),
-            torchvision.transforms.ToTensor(),
-        ])
-
-    def __len__(self) -> int:
-        """
-        Return the length of the dataset.
-        """
-        return len(self._files)
-
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Return the `index`-th image and its target image from the dataset.
-
-        Args:
-            index: Index of the image in the dataset.
-
-        Returns:
-            A tuple of the image tensor and the target image tensor.
-        """
-
-        img = Image.open(self._files[index])
-        return self._transform(img)
-
-
-@option(Configs.dataset, 'CelebA')
-def celeb_dataset(c: Configs):
-    """
-    Create CelebA dataset
-    """
-    return CelebADataset(c.image_size)
-
-
 class MNISTDataset(torchvision.datasets.MNIST):
     """
     ### MNIST dataset
@@ -292,6 +251,25 @@ def mnist_dataset(c: Configs):
     return MNISTDataset(c.image_size)
 
 
-#
-if __name__ == '__main__':
-    main()
+class CIFAR10Dataset(torchvision.datasets.CIFAR10):
+    """
+    ### MNIST dataset
+    """
+
+    def __init__(self, image_size):
+        transform = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(image_size),
+            torchvision.transforms.ToTensor(),
+        ])
+
+        super().__init__(str(lab.get_data_path()), train=True, download=True, transform=transform)
+
+    def __getitem__(self, item):
+        return super().__getitem__(item)[0]
+
+@option(Configs.dataset, 'CIFAR10')
+def mnist_dataset(c: Configs):
+    """
+    Create CIFAR10 dataset
+    """
+    return CIFAR10Dataset(c.image_size)
